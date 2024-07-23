@@ -267,12 +267,14 @@ namespace SerialPortLib
                     _readerCts = new CancellationTokenSource();
                     _reader = new Thread(ReaderTask);
                     _reader.Start(_readerCts.Token);
+                    notifiedOfClose = false;
                     OnConnectionStatusChanged(new ConnectionStatusChangedEventArgs(true));
                 }
             }
             return success;
         }
 
+        private bool notifiedOfClose;
         private void Close()
         {
             lock (_accessLock)
@@ -287,9 +289,15 @@ namespace SerialPortLib
                 if (_serialPort != null)
                 {
                     _serialPort.ErrorReceived -= HandleErrorReceived;
+                  
                     if (_serialPort.IsOpen)
                     {
                         _serialPort.Close();
+                        OnConnectionStatusChanged(new ConnectionStatusChangedEventArgs(false));
+                    }
+                    if (!_serialPort.IsOpen && !notifiedOfClose)
+                    {
+                        notifiedOfClose = true;
                         OnConnectionStatusChanged(new ConnectionStatusChangedEventArgs(false));
                     }
                     _serialPort.Dispose();
