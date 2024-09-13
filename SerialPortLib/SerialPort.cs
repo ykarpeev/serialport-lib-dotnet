@@ -57,7 +57,7 @@ namespace SerialPortLib
     /// <summary>
     /// Serial port I/O
     /// </summary>
-    public class SerialPortInput
+    public class SerialPortInput: ISerialPortInput
     {
 
         #region Private Fields
