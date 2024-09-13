@@ -1,5 +1,6 @@
 ﻿namespace SerialPortLib
 {
+    using System;
     using System.IO.Ports;
 
     /// <summary>
@@ -10,12 +11,12 @@
         /// <summary>
         /// Occurs when connection status changes.
         /// </summary>
-        event SerialPortInput.ConnectionStatusChangedEventHandler ConnectionStatusChanged;
+        event EventHandler<ConnectionStatusChangedEventArgs> ConnectionStatusChanged;
 
         /// <summary>
         /// Occurs when message is received.
         /// </summary>
-        event SerialPortInput.MessageReceivedEventHandler MessageReceived;
+        event EventHandler<MessageReceivedEventArgs> MessageReceived;
 
         /// <summary>
         /// Gets a value indicating whether this instance is connected.

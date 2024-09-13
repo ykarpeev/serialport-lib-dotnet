@@ -88,25 +88,16 @@ namespace SerialPortLib
 
         #region Public Events
 
-        /// <summary>
-        /// Connected state changed event.
-        /// </summary>
-        public delegate void ConnectionStatusChangedEventHandler(object sender, ConnectionStatusChangedEventArgs args);
-
+     
         /// <summary>
         /// Occurs when connected state changed.
         /// </summary>
-        public event ConnectionStatusChangedEventHandler ConnectionStatusChanged;
-
-        /// <summary>
-        /// Message received event.
-        /// </summary>
-        public delegate void MessageReceivedEventHandler(object sender, MessageReceivedEventArgs args);
+        public event EventHandler<ConnectionStatusChangedEventArgs> ConnectionStatusChanged;
 
         /// <summary>
         /// Occurs when message received.
         /// </summary>
-        public event MessageReceivedEventHandler MessageReceived;
+        public event EventHandler<MessageReceivedEventArgs> MessageReceived;
 
         #endregion
 
