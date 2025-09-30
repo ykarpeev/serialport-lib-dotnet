@@ -13,11 +13,8 @@
     <PackageLicense>./LICENSE</PackageLicense>
     <PackageProjectUrl>https://github.com/genielabs/serialport-lib-dotnet/</PackageProjectUrl>
     <PackageTags>serial port</PackageTags>
-<<<<<<< HEAD
     <TargetFrameworks>net6.0;netstandard2.0</TargetFrameworks>
-=======
     <TargetFrameworks>netstandard2.0;net472;net6.0;net8.0;net9.0</TargetFrameworks>
->>>>>>> 04fbc63373d17c0e84afa6dfa195ff635cf4af36
   </PropertyGroup>
   <ItemGroup Condition=" '$(TargetFramework)' == 'net9.0' ">
     <PackageReference Include="System.IO.Ports" Version="9.0.9" />
