@@ -1,7 +1,7 @@
 ﻿/*
   This file is part of SerialPortLib (https://github.com/genielabs/serialport-lib-dotnet)
- 
-  Copyright (2012-2023) G-Labs (https://github.com/genielabs)
+
+  Copyright (2012-2025) G-Labs (https://github.com/genielabs)
 
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -23,14 +23,13 @@
 
 using System;
 using System.Threading;
-
 using System.IO.Ports;
+using System.Runtime.CompilerServices; // Required for CallerMemberName
 using System.Runtime.InteropServices;
-using NLog;
+using GLabs.Logging;
 
 namespace SerialPortLib
 {
-
     /// <summary>
     /// DataBits enum.
     /// </summary>
@@ -62,8 +61,9 @@ namespace SerialPortLib
 
         #region Private Fields
 
-        private static Logger _logger = LogManager.GetCurrentClassLogger();
         private SerialPort _serialPort;
+        private static readonly Logger Log = LogManager.GetLogger("SerialPortLib");
+
 
         private string _portName = "";
         private int _baudRate = 115200;
@@ -77,12 +77,19 @@ namespace SerialPortLib
         // Serial port reader task
         private Thread _reader;
         private CancellationTokenSource _readerCts;
-        // Serial port connection watcher
-        private Thread _connectionWatcher;
-        private CancellationTokenSource _connectionWatcherCts;
+        private readonly byte[] _buffer = new byte[2048];
 
-        private readonly object _accessLock = new object();
+        // Serial port connection watcher
+        private static Timer _connectionWatcherTimer;
+
+
+        private readonly object _serialPortLock = new object(); // Renamed for clarity
         private bool _disconnectRequested;
+
+        private const int ReaderJoinTimeoutMs = 5000;
+        private const int ConnectionWatcherSleepMs = 1000;
+        private const int DefaultReconnectDelayMs = 1000;
+        private const int DefaultReadWriteTimeoutMs = 5000;
 
         #endregion
 
@@ -105,7 +112,6 @@ namespace SerialPortLib
 
         public SerialPortInput()
         {
-            _connectionWatcherCts = new CancellationTokenSource();
             _readerCts = new CancellationTokenSource();
         }
 
@@ -118,13 +124,11 @@ namespace SerialPortLib
             {
                 return false;
             }
-            lock (_accessLock)
+            lock (_serialPortLock)
             {
                 Disconnect();
                 Open();
-                _connectionWatcherCts = new CancellationTokenSource();
-                _connectionWatcher = new Thread(ConnectionWatcherTask) { IsBackground = true };
-                _connectionWatcher.Start(_connectionWatcherCts.Token);
+                _connectionWatcherTimer = new Timer(ConnectionWatcherTask, null, ConnectionWatcherSleepMs, ConnectionWatcherSleepMs);
             }
             return IsConnected;
         }
@@ -140,15 +144,12 @@ namespace SerialPortLib
             }
             _disconnectRequested = true;
             Close();
-            lock (_accessLock)
+            lock (_serialPortLock)
             {
-                if (_connectionWatcher != null)
+                if (_connectionWatcherTimer != null)
                 {
-                    if (!_connectionWatcher.Join(5000))
-                    {
-                        _connectionWatcherCts.Cancel();
-                    }
-                    _connectionWatcher = null;
+                    _connectionWatcherTimer.Dispose();
+                    _connectionWatcherTimer = null;
                 }
                 _disconnectRequested = false;
             }
@@ -160,7 +161,7 @@ namespace SerialPortLib
         /// <value><c>true</c> if connected; otherwise, <c>false</c>.</value>
         public bool IsConnected
         {
-            get { return _serialPort != null && !_gotReadWriteError && !_disconnectRequested; }
+            get { return _serialPort != null && _serialPort.IsOpen && !_gotReadWriteError && !_disconnectRequested; }
         }
 
         /// <summary>
@@ -187,7 +188,23 @@ namespace SerialPortLib
                 {
                     Connect();      // Take into account immediately the new connection parameters
                 }
-                LogDebug(string.Format("Port parameters changed (port name {0} / baudrate {1} / stopbits {2} / parity {3} / databits {4})", portName, baudRate, stopBits, parity, dataBits));
+                Log.Debug($"Port parameters changed (port name {_portName} / baudrate {_baudRate} / stopbits {_stopBits} / parity {_parity} / databits {_dataBits})");
+            }
+        }
+
+        /// <summary>
+        /// Returns the underlying System.IO.Ports.SerialPort instance 
+        /// </summary>
+        /// <returns></returns>
+        public SerialPort SerialPort
+        {
+            get
+            {
+                if (_serialPort == null)
+                {
+                    _serialPort = new SerialPort();
+                }
+                return _serialPort;
             }
         }
 
@@ -205,11 +222,21 @@ namespace SerialPortLib
                 {
                     _serialPort.Write(message, 0, message.Length);
                     success = true;
-                    LogDebug(BitConverter.ToString(message));
+                    Log.Debug(BitConverter.ToString(message));
+                }
+                catch (ObjectDisposedException e)
+                {
+                    _gotReadWriteError = true;
+                    Log.Error(e);
+                }
+                catch (TimeoutException e)
+                {
+                    _gotReadWriteError = true;
+                    Log.Error(e);
                 }
                 catch (Exception e)
                 {
-                    LogError(e);
+                    Log.Error(e);
                 }
             }
             return success;
@@ -218,7 +245,12 @@ namespace SerialPortLib
         /// <summary>
         /// Gets/Sets serial port reconnection delay in milliseconds.
         /// </summary>
-        public int ReconnectDelay { get; set; } = 1000;
+        public int ReconnectDelay { get; set; } = DefaultReconnectDelayMs;
+        
+        /// <summary>
+        /// Gets or sets the serial port read/write timeout.
+        /// </summary>
+        public int Timeout { get; set; } = DefaultReadWriteTimeoutMs;
 
         #endregion
 
@@ -229,7 +261,7 @@ namespace SerialPortLib
         private bool Open()
         {
             bool success = false;
-            lock (_accessLock)
+            lock (_serialPortLock)
             {
                 Close();
                 try
@@ -243,23 +275,25 @@ namespace SerialPortLib
                     }
                     if (tryOpen)
                     {
-                        _serialPort = new SerialPort();
-                        _serialPort.ErrorReceived += HandleErrorReceived;
-                        _serialPort.PortName = _portName;
-                        _serialPort.BaudRate = _baudRate;
-                        _serialPort.StopBits = _stopBits;
-                        _serialPort.Parity = _parity;
-                        _serialPort.DataBits = (int)_dataBits;
+                        SerialPort.ErrorReceived += HandleErrorReceived;
+                        SerialPort.PortName = _portName;
+                        SerialPort.BaudRate = _baudRate;
+                        SerialPort.StopBits = _stopBits;
+                        SerialPort.Parity = _parity;
+                        SerialPort.DataBits = (int)_dataBits;
+                        SerialPort.ReadTimeout = Timeout;
+                        SerialPort.WriteTimeout = Timeout;
 
                         // We are not using serialPort.DataReceived event for receiving data since this is not working under Linux/Mono.
                         // We use the readerTask instead (see below).
-                        _serialPort.Open();
+
+                        SerialPort.Open();
                         success = true;
                     }
                 }
                 catch (Exception e)
                 {
-                    LogError(e);
+                    Log.Error(e);
                     Close();
                 }
                 if (_serialPort != null && _serialPort.IsOpen)
@@ -279,12 +313,12 @@ namespace SerialPortLib
         private bool notifiedOfClose;
         private void Close()
         {
-            lock (_accessLock)
+            lock (_serialPortLock)
             {
                 // Stop the Reader task
                 if (_reader != null)
                 {
-                    if (!_reader.Join(5000))
+                    if (!_reader.Join(ReaderJoinTimeoutMs))
                         _readerCts.Cancel();
                     _reader = null;
                 }
@@ -294,8 +328,18 @@ namespace SerialPortLib
                   
                     if (_serialPort.IsOpen)
                     {
-                        _serialPort.Close();
-                        OnConnectionStatusChanged(new ConnectionStatusChangedEventArgs(false));
+                        try
+                        {
+                            _serialPort.Close();
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Error(ex); // Log the exception during close
+                        }
+                        if (!_serialPort.IsOpen)
+                        {
+                            OnConnectionStatusChanged(new ConnectionStatusChangedEventArgs(false));
+                        }
                     }
                     if (!_serialPort.IsOpen && !notifiedOfClose)
                     {
@@ -323,88 +367,58 @@ namespace SerialPortLib
             var ct = (CancellationToken) data;
             while (IsConnected && !ct.IsCancellationRequested)
             {
-                int msglen = 0;
-                //
                 try
                 {
-                    msglen = _serialPort.BytesToRead;
-                    if (msglen > 0)
+                    var readerTask = _serialPort?.BaseStream.ReadAsync(_buffer, 0, _buffer.Length, ct);
+                    readerTask?.Wait(ct);
+                    if (readerTask?.Result > 0)
                     {
-                        byte[] message = new byte[msglen];
-                        //
-                        int readBytes = 0;
-                        while (readBytes <= 0)
-                            readBytes = _serialPort.Read(message, readBytes, msglen - readBytes); // noop
-                        if (MessageReceived != null)
-                        {
-                            OnMessageReceived(new MessageReceivedEventArgs(message));
-                        }
+                        byte[] received = new byte[readerTask.Result];
+                        Buffer.BlockCopy(_buffer, 0, received, 0, readerTask.Result);
+                        OnMessageReceived(new MessageReceivedEventArgs(received));
                     }
-                    else
-                    {
-                        Thread.Sleep(100);
-                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Task was cancelled, exit gracefully
+                    break;
                 }
                 catch (Exception e)
                 {
-                    LogError(e);
+                    Log.Error(e);
                     _gotReadWriteError = true;
-                    Thread.Sleep(1000);
+                    Thread.Sleep(DefaultReconnectDelayMs);
                 }
             }
         }
 
         private void ConnectionWatcherTask(object data)
         {
-            var ct = (CancellationToken) data;
             // This task takes care of automatically reconnecting the interface
             // when the connection is drop or if an I/O error occurs
-            while (!_disconnectRequested && !ct.IsCancellationRequested)
+            if (!_disconnectRequested && _gotReadWriteError)
             {
-                if (_gotReadWriteError)
+                try
                 {
-                    try
+                    if (_serialPort != null && _serialPort.IsOpen)
                     {
                         Close();
-                        // wait "ReconnectDelay" seconds before reconnecting
-                        Thread.Sleep(ReconnectDelay);
-                        if (!_disconnectRequested)
-                        {
-                            try
-                            {
-                                Open();
-                            }
-                            catch (Exception e)
-                            {
-                                LogError(e);
-                            }
-                        }
                     }
-                    catch (Exception e)
+                    else
                     {
-                        LogError(e);
+                        Open();
                     }
                 }
-                if (!_disconnectRequested)
+                catch (Exception e)
                 {
-                    Thread.Sleep(1000);
+                    Log.Error(e);
                 }
             }
         }
 
-        private void LogDebug(string message)
+        private void LogError(SerialError error, [CallerMemberName] string methodName = "")
         {
-            _logger.Debug(message);
-        }
-
-        private void LogError(Exception ex)
-        {
-            _logger.Error(ex, null);
-        }
-
-        private void LogError(SerialError error)
-        {
-            _logger.Error("SerialPort ErrorReceived: {0}", error);
+            Log.Error("SerialPort error occurred in {MethodName}: {Error}", methodName, error);
         }
 
         #endregion
@@ -417,11 +431,8 @@ namespace SerialPortLib
         /// <param name="args">Arguments.</param>
         protected virtual void OnConnectionStatusChanged(ConnectionStatusChangedEventArgs args)
         {
-            LogDebug(args.Connected.ToString());
-            if (ConnectionStatusChanged != null)
-            {
-                ConnectionStatusChanged(this, args);
-            }
+            Log.Debug(args.Connected.ToString());
+            ConnectionStatusChanged?.Invoke(this, args);
         }
 
         /// <summary>
@@ -430,11 +441,8 @@ namespace SerialPortLib
         /// <param name="args">Arguments.</param>
         protected virtual void OnMessageReceived(MessageReceivedEventArgs args)
         {
-            LogDebug(BitConverter.ToString(args.Data));
-            if (MessageReceived != null)
-            {
-                MessageReceived(this, args);
-            }
+            Log.Debug(BitConverter.ToString(args.Data));
+            MessageReceived?.Invoke(this, args);
         }
 
         #endregion
@@ -442,5 +450,4 @@ namespace SerialPortLib
         #endregion
 
     }
-
 }
